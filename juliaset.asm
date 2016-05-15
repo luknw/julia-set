@@ -15,10 +15,8 @@ arglens				db ARGNUM dup(0d)
 
 
 str_usage			db 'juliaset X_MIN X_MAX Y_MIN Y_MAX C_R C_I',13d,10d,13d,10d
-					db 'All arguments should be of form:',13d,10d
-					db '-?[0-9]+\.[0-9]+',13d,10d,13d,10d
-					db 'In addition, arguments should satisfy:',13d,10d
-					db 'X_MIN < X_MAX && Y_MIN < Y_MAX',13d,10d,'$'
+					db 'All arguments should be of form:	-?[0-9]*\.[0-9]*',13d,10d
+					db 'In addition, arguments should satisfy:	X_MIN < X_MAX && Y_MIN < Y_MAX',13d,10d,'$'
 
 
 err_overflow		db 'error: arguments too long',13d,10d,13d,10d,'$'
@@ -30,7 +28,7 @@ screen_width_px		real10 320.0
 screen_height_px	real10 200.0
 
 
-fstatus				dw ?
+fwordvar				dw ?
 
 xmin				real10 ?
 ymin				real10 ?
@@ -43,6 +41,12 @@ ci					real10 ?
 
 two					real10 2.0
 four				real10 4.0
+ten					real10 10.0
+
+sign				db ?
+
+;debug
+tmp					db -1.0
 
 data ends
 
@@ -105,18 +109,18 @@ ARGP macro INDEX, REG					;returns in REG pointer to near pointer to argument wi
 endm
 
 ARG macro INDEX, REG					;returns in REG near pointer to argument with index INDEX, indices begin from 0
-	push bx								;REG cannot be bx
+	push di								;REG cannot be di
 	push ds
 
 	LD_STO_SEG ds
 
 	ARGP INDEX, REG
 
-	mov bx,REG
-	mov REG,ds:[bx]
+	mov di,REG
+	mov REG,ds:[di]
 
 	pop ds
-	pop bx
+	pop di
 endm
 
 ARGV macro INDEX, REG					;returns in REG first word of argument with index INDEX, indices begin from 0
@@ -402,65 +406,171 @@ warn_no_arguments:				;just print usage info and exit
 	ERROR_EXIT 1d
 parse_args endp
 
-comment #
-verify_key proc
-;todo
+
+debug macro CHAR
 	push ax
-	push si
+	push dx
 
-	ARGLEN dx, si				;check size of argument with index dx
-	test si,si					;if it's 0 (argument isn't provided)
-	jz cleanup					;leave default, jump to cleanup
+	mov ah,02h
+	mov dl,CHAR
+	int 21h
 
-	ARG dx, si					;point si at an argument with index dx
+	mov ah,00h
+	int 16h
 
-get_char:
-	lodsb
-	cmp al,0d
-	je key_ok
+	pop dx
+	pop ax
+endm
 
-	cmp al,'0'					;check below 0
-	jb error_key_value
 
-	cmp al,'9'					;check above 9
-	ja not_digit
+PRINT_NUMBER macro NUMBER
+	push ax
+	push bx
 
-	jmp get_char	
+	mov ax,NUMBER
+	mov bx,10d
+	call $print_number
 
-not_digit:
-	cmp al,'A'					;check below A
-	jb error_key_value
+	pop bx
+	pop ax
+endm
 
-	cmp al,'Z'					;check above Z
-	ja not_capital
+$print_number proc	;al: (un)signed number to print, bl: 0 < radix <= 10
+	push ax
+	push cx
+	push dx
 
-	jmp get_char
+	xor dx,dx
+	xor cx,cx		;cx = 0; digit count
 
-not_capital:
-	cmp al,'a'					;check below a
-	jb error_key_value
+	cmp ax,0d		;is negative?
+jge char
+print_minus:
+	push ax			;preserve the number through int21h call
+	push dx
 
-	cmp al,'z'					;check above z
-	ja error_key_value
+	mov dl,'-'		;print minus
+	mov ah,02h
+	int 21h
 
-	jmp get_char
+	pop dx
+	pop ax			;get the number back
+	neg ax			;continue with non-negative number
 
-key_ok:
-	COPY_ARG dx, seg key, offset key	;copy key from parser storage to dedicated key variable
+char:
+	div bx			;divide by radix, dx = ax % bx, ax = ax / bx
 
-cleanup:
-	pop si
+	add dx,'0'		;convert remainder digit into ascii char
+	push dx			;save remainder digit char on the stack
+	inc cx			;increment digit count
+
+	xor dx,dx
+	test ax,ax		;check whether number is zero
+jnz char
+
+print_char:
+	pop dx			;get digit
+	mov ah,02h		;print char from dl
+	int 21h
+loop print_char		;decrement digit count cx and check if it's zero
+
+	pop dx
+	pop cx
 	pop ax
 	ret
+$print_number endp
 
-error_key_value:
-	ERROR_EXIT_STR -4d, err_key_value
-verify_key endp
-#
 
-;todo
+;fpusha
+;Converts array at ds:[bx] of length cx into floating point value on the FPU stack.
 fpusha proc
+	fld real10 ptr ds:[ten]
+	fldz
 
+	xor ah,ah
+
+	mov al,ds:[bx]
+
+	cmp al,'-'
+	je negative
+
+	mov byte ptr ds:[sign],0
+
+next_char:
+	cmp al,'.'
+	je fractional_part
+	
+	cmp al,'0'
+	jb error_arg_value
+	
+	cmp al,'9'
+	ja error_arg_value
+
+	fmul st(0),st(1)			;x *= 10
+
+	sub al,'0'
+	mov ds:[fwordvar],ax
+	fild word ptr ds:[fwordvar]
+	fadd						;x = x + next_digit
+
+	inc bx
+	mov al,ds:[bx]
+
+	loop next_char
+
+	jmp error_arg_value
+
+fractional_part:
+	fldz
+	add bx,cx					;point bx at the last char of the array
+	dec bx
+
+	mov al,ds:[bx]
+next_fractional_char:
+	cmp al,'.'
+	je end_loop
+
+	cmp al,'0'
+	jb error_arg_value
+
+	cmp al,'9'
+	ja error_arg_value
+
+	sub al,'0'
+	mov ds:[fwordvar],ax
+	fild word ptr ds:[fwordvar]
+
+	fadd						;x = x + next_digit
+	fdiv st(0),st(2)			;x /= 10
+
+	dec bx
+	mov al,ds:[bx]
+
+	loop next_fractional_char
+
+end_loop:
+	cmp cx,1d
+	jne error_arg_value
+
+	fadd						;x = x_integral + x_fractional
+
+	cmp byte ptr ds:[sign],0d
+	je cleanup
+	fchs
+
+cleanup:
+	fstp st(1)
+	ret
+
+negative:
+	mov byte ptr ds:[sign],1
+	inc bx
+	mov al,ds:[bx]
+	dec cx						;argument is effectively shorter by minus
+	jmp next_char
+
+error_arg_value:
+	ERROR_EXIT_STR -3d, err_arg_value
 fpusha endp
 
 
@@ -471,6 +581,7 @@ fpusha endp
 convert_args proc
 	push ax
 	push bx
+	push cx
 	push dx
 	push ds
 
@@ -485,78 +596,97 @@ convert_args proc
 	ERROR_EXIT_STR -2d, err_arg_count	;else: invalid number of arguments
 
 process_xmin:
-	ARG dx, ax
-	ARGLEN dx, bx
+	ARG dx, bx
+	ARGLEN dx, cx
 	call fpusha
 	fld st
 	fstp real10 ptr ds:[xmin]
 
 	inc dx
 ;xmax
-	ARG dx, ax
-	ARGLEN dx, bx
+	ARG dx, bx
+	ARGLEN dx, cx
 	call fpusha
 ;(xmin < xmax)?
-	fsub
+	fsubr
 
 	ftst
-	fstsw word ptr ds:[fstatus]
-	mov ax,ds:[fstatus]
-	lahf
-	jbe error_invalid_arguments
+	fstsw word ptr ds:[fwordvar]
+	mov ax,word ptr ds:[fwordvar]
+	sahf
+	jbe error_arg_value
 
 	fld real10 ptr ds:[screen_width_px]
-	fdivr
+	fdiv
+	;debug
+	fist word ptr ds:[tmp]
+	print_number word ptr ds:[tmp]
+	;debug
 	fstp real10 ptr ds:[xdp]
+	;debug
+	fld real10 ptr ds:[xdp]
+	fistp word ptr ds:[tmp]
+	print_number word ptr ds:[tmp]
+	;debug
 
 	inc dx
 ;ymin
-	ARG dx, ax
-	ARGLEN dx, bx
+	ARG dx, bx
+	ARGLEN dx, cx
 	call fpusha
 	fld st
 	fstp real10 ptr ds:[ymin]
 
 	inc dx
 ;ymax
-	ARG dx, ax
-	ARGLEN dx, bx
+	ARG dx, bx
+	ARGLEN dx, cx
 	call fpusha
 ;(ymin < ymax)?
-	fsub
+	fsubr
 
 	ftst
-	fstsw word ptr ds:[fstatus]
-	mov ax,ds:[fstatus]
-	lahf
-	jbe error_invalid_arguments
+	fstsw word ptr ds:[fwordvar]
+	mov ax,ds:[fwordvar]
+	sahf
+	jbe error_arg_value
 
 	fld real10 ptr ds:[screen_height_px]
-	fdivr
+	fdiv
+	;debug
+	fist word ptr ds:[tmp]
+	print_number word ptr ds:[tmp]
+	;debug
 	fstp real10 ptr ds:[ydp]
+	;debug
+	fld real10 ptr ds:[ydp]
+	fistp word ptr ds:[tmp]
+	print_number word ptr ds:[tmp]
+	;debug
 
 	inc dx
 ;cr
-	ARG dx, ax
-	ARGLEN dx, bx
+	ARG dx, bx
+	ARGLEN dx, cx
 	call fpusha
 	fstp real10 ptr ds:[cr]
 
 	inc dx
 ;ci
-	ARG dx, ax
-	ARGLEN dx, bx
+	ARG dx, bx
+	ARGLEN dx, cx
 	call fpusha
 	fstp real10 ptr ds:[ci]
 
 	pop ds
 	pop dx
+	pop cx
 	pop bx
 	pop ax
 	ret
 
-error_invalid_arguments:
-	ERROR_EXIT_STR -3d, error_invalid_arguments
+error_arg_value:
+	ERROR_EXIT_STR -3d, err_arg_value
 convert_args endp
 
 
@@ -571,11 +701,24 @@ main:
 	mov ss,ax
 	mov sp,offset top
 
+	LD_STO_SEG ds
+
 	call parse_args
 
 	finit
 
 	call convert_args
+
+	;debug
+	fld real10 ptr ds:[xdp]
+	fistp word ptr ds:[tmp]
+	print_number word ptr ds:[tmp]
+	;debug
+	;debug
+	fld real10 ptr ds:[ydp]
+	fistp word ptr ds:[tmp]
+	print_number word ptr ds:[tmp]
+	;debug
 
 	call draw
 	
