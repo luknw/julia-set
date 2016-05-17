@@ -1,3 +1,5 @@
+.286
+.287
 data segment
 ;Argument storage format:
 ;storage		:byte[STO_SIZE]			- NULL-terminated arguments
@@ -23,30 +25,35 @@ err_overflow		db 'error: arguments too long',13d,10d,13d,10d,'$'
 err_arg_count		db 'error: invalid number of arguments',13d,10d,13d,10d,'$'
 err_arg_value		db 'error: invalid arguments',13d,10d,13d,10d,'$'
 
+SCREEN_WIDTH_PX		= 320
+SCREEN_HEIGHT_PX	= 200
 
-screen_width_px		real10 320.0
-screen_height_px	real10 200.0
+sw					dw SCREEN_WIDTH_PX - 1
+sh					dw SCREEN_HEIGHT_PX - 1
 
+colour_offset		dw ? ;40h ;20h ;51h
+julia_colour		db ? ;00h
 
-fwordvar				dw ?
+fbuffer				dw ?
 
-xmin				real10 ?
-ymin				real10 ?
+x					dw ?
+y					dw ?
+ypy					dw ?
+yk					dw ?
 
-xdp					real10 ?
-ydp					real10 ?
+xmin				real8 ?
+ymin				real8 ?
 
-cr					real10 ?
-ci					real10 ?
+xdp					real8 ?
+ydp					real8 ?
 
-two					real10 2.0
-four				real10 4.0
-ten					real10 10.0
+cr					real8 ?
+ci					real8 ?
+
+four				real8 4.0
+ten					real8 10.0
 
 sign				db ?
-
-;debug
-tmp					db -1.0
 
 data ends
 
@@ -407,84 +414,42 @@ warn_no_arguments:				;just print usage info and exit
 parse_args endp
 
 
-debug macro CHAR
-	push ax
-	push dx
-
-	mov ah,02h
-	mov dl,CHAR
-	int 21h
-
-	mov ah,00h
-	int 16h
-
-	pop dx
-	pop ax
-endm
-
-
-PRINT_NUMBER macro NUMBER
-	push ax
-	push bx
-
-	mov ax,NUMBER
-	mov bx,10d
-	call $print_number
-
-	pop bx
-	pop ax
-endm
-
-$print_number proc	;al: (un)signed number to print, bl: 0 < radix <= 10
+set_random_colour proc
 	push ax
 	push cx
 	push dx
+	push ds
 
-	xor dx,dx
-	xor cx,cx		;cx = 0; digit count
+	LD_STO_SEG ds
 
-	cmp ax,0d		;is negative?
-jge char
-print_minus:
-	push ax			;preserve the number through int21h call
-	push dx
-
-	mov dl,'-'		;print minus
-	mov ah,02h
+	mov ah,2ch		;get system time
 	int 21h
+	mov byte ptr ds:[colour_offset],dl
 
-	pop dx
-	pop ax			;get the number back
-	neg ax			;continue with non-negative number
-
-char:
-	div bx			;divide by radix, dx = ax % bx, ax = ax / bx
-
-	add dx,'0'		;convert remainder digit into ascii char
-	push dx			;save remainder digit char on the stack
-	inc cx			;increment digit count
-
-	xor dx,dx
-	test ax,ax		;check whether number is zero
-jnz char
-
-print_char:
-	pop dx			;get digit
-	mov ah,02h		;print char from dl
+	mov ah,2ch		;get system time
 	int 21h
-loop print_char		;decrement digit count cx and check if it's zero
+	add byte ptr ds:[colour_offset],dl
 
+	mov ah,2ch		;get system time
+	int 21h
+	add byte ptr ds:[julia_colour],dl
+
+	mov ah,2ch		;get system time
+	int 21h
+	add byte ptr ds:[julia_colour],dl
+
+	pop ds
 	pop dx
 	pop cx
 	pop ax
 	ret
-$print_number endp
+set_random_colour endp
 
 
 ;fpusha
 ;Converts array at ds:[bx] of length cx into floating point value on the FPU stack.
 fpusha proc
-	fld real10 ptr ds:[ten]
+	fld real8 ptr ds:[ten]
 	fldz
 
 	xor ah,ah
@@ -509,8 +474,8 @@ next_char:
 	fmul st(0),st(1)			;x *= 10
 
 	sub al,'0'
-	mov ds:[fwordvar],ax
-	fild word ptr ds:[fwordvar]
+	mov ds:[fbuffer],ax
+	fild word ptr ds:[fbuffer]
 	fadd						;x = x + next_digit
 
 	inc bx
@@ -537,8 +502,8 @@ next_fractional_char:
 	ja error_arg_value
 
 	sub al,'0'
-	mov ds:[fwordvar],ax
-	fild word ptr ds:[fwordvar]
+	mov ds:[fbuffer],ax
+	fild word ptr ds:[fbuffer]
 
 	fadd						;x = x + next_digit
 	fdiv st(0),st(2)			;x /= 10
@@ -599,8 +564,7 @@ process_xmin:
 	ARG dx, bx
 	ARGLEN dx, cx
 	call fpusha
-	fld st
-	fstp real10 ptr ds:[xmin]
+	fst real8 ptr ds:[xmin]
 
 	inc dx
 ;xmax
@@ -611,31 +575,20 @@ process_xmin:
 	fsubr
 
 	ftst
-	fstsw word ptr ds:[fwordvar]
-	mov ax,word ptr ds:[fwordvar]
+	fstsw ax
 	sahf
 	jbe error_arg_value
 
-	fld real10 ptr ds:[screen_width_px]
+	fild word ptr ds:[sw]
 	fdiv
-	;debug
-	fist word ptr ds:[tmp]
-	print_number word ptr ds:[tmp]
-	;debug
-	fstp real10 ptr ds:[xdp]
-	;debug
-	fld real10 ptr ds:[xdp]
-	fistp word ptr ds:[tmp]
-	print_number word ptr ds:[tmp]
-	;debug
+	fstp real8 ptr ds:[xdp]
 
 	inc dx
 ;ymin
 	ARG dx, bx
 	ARGLEN dx, cx
 	call fpusha
-	fld st
-	fstp real10 ptr ds:[ymin]
+	fst real8 ptr ds:[ymin]
 
 	inc dx
 ;ymax
@@ -646,37 +599,27 @@ process_xmin:
 	fsubr
 
 	ftst
-	fstsw word ptr ds:[fwordvar]
-	mov ax,ds:[fwordvar]
+	fstsw ax
 	sahf
 	jbe error_arg_value
 
-	fld real10 ptr ds:[screen_height_px]
+	fild word ptr ds:[sh]
 	fdiv
-	;debug
-	fist word ptr ds:[tmp]
-	print_number word ptr ds:[tmp]
-	;debug
-	fstp real10 ptr ds:[ydp]
-	;debug
-	fld real10 ptr ds:[ydp]
-	fistp word ptr ds:[tmp]
-	print_number word ptr ds:[tmp]
-	;debug
+	fstp real8 ptr ds:[ydp]
 
 	inc dx
 ;cr
 	ARG dx, bx
 	ARGLEN dx, cx
 	call fpusha
-	fstp real10 ptr ds:[cr]
+	fstp real8 ptr ds:[cr]
 
 	inc dx
 ;ci
 	ARG dx, bx
 	ARGLEN dx, cx
 	call fpusha
-	fstp real10 ptr ds:[ci]
+	fstp real8 ptr ds:[ci]
 
 	pop ds
 	pop dx
@@ -691,8 +634,123 @@ convert_args endp
 
 
 draw proc
-;todo
+	push ax
+	push bx
+	push cx
+	push dx
+	push si
+	push di
+	push ds
+	push es
+
+	LD_STO_SEG ds
+	mov ax,0a000h				;graphics segment
+	mov es,ax
+
+	mov ax,0013h				;graphics mode
+	int 10h
+
+	fld real8 ptr ds:[four]		;push constants
+	fld real8 ptr ds:[ci]
+	fld real8 ptr ds:[cr]
+
+	mov bx,SCREEN_WIDTH_PX * SCREEN_HEIGHT_PX - 1 ;offset of the end of the graphics buffer
+
+	mov di,word ptr ds:[sh]
+y_loop:							;drawing from bottom right to top left
+	mov word ptr ds:[y],di		;push current y pixel
+	fild word ptr ds:[y]
+
+	fld real8 ptr ds:[ydp]		;calculate zi = y
+	fmul
+	fld real8 ptr ds:[ymin]
+	fadd
+
+	fld st(0)					;calculate 2y and y^2
+	fld st(0)
+	fadd st(2),st(0)
+	fmul
+
+	fstp real8 ptr ds:[yk]
+	fstp real8 ptr ds:[ypy]
+	mov si,word ptr ds:[sw]
+x_loop:							;fstack: cr ci 4.0
+	fld real8 ptr ds:[ypy]		;2y cr ci 4.0
+	fld real8 ptr ds:[yk]		;y^2 2y cr ci 4.0
+
+	mov word ptr ds:[x],si		;push current x pixel
+	fild word ptr ds:[x]
+
+	fld real8 ptr ds:[xdp]		;x y^2 2y cr ci 4.0
+	fmul
+	fld real8 ptr ds:[xmin]
+	fadd
+
+	fmul st(2),st(0)			;x y^2 2xy cr ci 4.0
+	fld st(0)					;x x y^2 2xy cr ci 2.0 4.0
+	fmul						;x^2 y^2 2xy cr ci 2.0 4.0
+
+	mov cx,1000d
+calc_loop:						;fstack: x^2 y^2 2xy cr ci 4.0
+	fsubr						;x^2-y^2 2xy cr ci 4.0
+	fadd st(0),st(2)			;x^2-y^2+cr=x' 2xy cr ci 4.0
+	fld	st(0)					;x' x' 2xy cr ci 4.0
+	fld st(0)					;x' x' x' 2xy cr ci 4.0
+	fmul st(2),st(0)			;x' x' x'^2 2xy cr ci 4.0
+	fadd						;2x' x'^2 2xy cr ci 4.0
+	fxch st(2)					;2xy x'^2 2x' cr ci 4.0
+	fadd st(0),st(4)			;2xy+ci=y' x'^2 2x' cr ci 4.0
+	fmul st(2),st(0)			;y' x'^2 2x'y' cr ci 4.0
+	fld st(0)					;y' y' x'^2 2x'y' cr ci 4.0
+	fmul						;y'^2 x'^2 2x'y' cr ci 4.0
+	fxch						;x'^2 y'^2 2x'y' cr ci 4.0	- initial form for x', y'
+
+	fld st(0)					;if(x^2 + y^2 > 4) break;
+	fadd st(0),st(2)
+	fcomp st(6)
+	fstsw word ptr ds:[fbuffer]
+	mov ax,word ptr ds:[fbuffer]
+	sahf
+	ja break
+
+	loop calc_loop
+
+	mov cl,byte ptr ds:[julia_colour]
+	mov byte ptr es:[bx],cl
+
+end_loop:
+	fstp st(0)
+	fstp st(0)
+	fstp st(0)
+	dec bx
+
+	dec si
+	jns x_loop					;jump if no sign <==> ax >= 0
+
+	dec di
+	jns y_loop
+
+
+	mov ah,00h					;wait for a key
+	int 16h
+
+	mov ax,0003h				;back to text mode
+	int 10h
+
+	pop es
+	pop ds
+	pop di
+	pop si
+	pop dx
+	pop cx
+	pop bx
+	pop ax
 	ret
+
+break:
+	add cx,word ptr ds:[colour_offset]
+	mov byte ptr es:[bx],cl
+	jmp end_loop
 draw endp
 
 
@@ -701,7 +759,7 @@ main:
 	mov ss,ax
 	mov sp,offset top
 
-	LD_STO_SEG ds
+	call set_random_colour
 
 	call parse_args
 
@@ -709,21 +767,7 @@ main:
 
 	call convert_args
 
-	;debug
-	fld real10 ptr ds:[xdp]
-	fistp word ptr ds:[tmp]
-	print_number word ptr ds:[tmp]
-	;debug
-	;debug
-	fld real10 ptr ds:[ydp]
-	fistp word ptr ds:[tmp]
-	print_number word ptr ds:[tmp]
-	;debug
-
 	call draw
-	
-	mov ah,00h
-	int 16h
 
 	mov ax,4c00h
 	int 21h
